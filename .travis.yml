@@ -1,10 +1,11 @@
 env:
   global:
     - secure: t/lVWNdPrl854+kNk5rdhUcbc0rzioqh18901ax9QqzN80GUjC/K91BeNJ/PEOIUCREkAhLoB4TNVCBzsz4XMork6fVIuQ/0ZKY+nJc86DTjaOG7CCsP/jd83isEY+/hq3CAkJrWQi0AJsdHri4dPzOgv08gwOyEkItwY5HCwRI=
+    - LD_LIBRARY_PATH=/usr/local/lib
 language: rust
 script:
   - cargo build -v
   - cargo test -v
-  - cargo doc -v
+  - rustdoc -o doc src/lib.rs
 after_script:
   - curl http://www.rust-ci.org/artifacts/put?t=$RUSTCI_TOKEN | sh
