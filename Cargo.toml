@@ -1,0 +1,16 @@
+[package]
+
+name = "TaskGraph"
+version = "0.0.1"
+authors = ["tobbebex <tobias_bexelius@hotmail.com>"]
+
+
+[lib]
+
+name = "task_graph"
+path = "src/lib.rs"
+test = true
+doctest = true
+bench = false
+doc = true
+plugin = false
