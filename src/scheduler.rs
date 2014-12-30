@@ -36,9 +36,9 @@ pub struct TestScheduler
     scheduled_count : Arc<AtomicUint>
 }
 
-impl Send for SequentialScheduler {}
-impl Send for SpawningScheduler {}
-impl Send for TestScheduler {}
+unsafe impl Send for SequentialScheduler {}
+unsafe impl Send for SpawningScheduler {}
+unsafe impl Send for TestScheduler {}
 
 impl TestScheduler
 {

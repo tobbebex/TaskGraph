@@ -69,8 +69,8 @@ pub struct Task<A : Send + Sync>
     value : Arc<RWLock<Option<A>>>
 }
 
-impl<A : Send + Sync> Send for Task<A> {}
-impl<A : Send + Sync> Sync for Task<A> {}
+unsafe impl<A : Send + Sync> Send for Task<A> {}
+unsafe impl<A : Send + Sync> Sync for Task<A> {}
 
 impl<A : Send + Sync> Task<A>
 {
