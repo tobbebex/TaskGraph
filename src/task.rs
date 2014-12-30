@@ -63,12 +63,14 @@ fn setup_prereqs<F,S>(prereqs : Vec<&Mutex<Sender<Arc<SharedDependency>>>>, sche
 /// to be both `Send` (for being send to other threads) and `Sync` (for being read concurrently
 /// by multiple dependent tasks). `Task` itself implements these traits itself and can thus
 /// be used inside and returned from other tasks (effectively forming a monad).
-#[deriving(Send,Sync)]
-pub struct Task<A>
+pub struct Task<A : Send + Sync>
 {
     deps_after : Mutex<Sender<Arc<SharedDependency>>>,
     value : Arc<RWLock<Option<A>>>
 }
+
+impl<A : Send + Sync> Send for Task<A> {}
+impl<A : Send + Sync> Sync for Task<A> {}
 
 impl<A : Send + Sync> Task<A>
 {

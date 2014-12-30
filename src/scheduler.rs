@@ -18,23 +18,27 @@ pub trait Scheduler : Clone + Send
 /// Scheduler that immediatly runs the function in the same thread 
 ///
 /// Gives no parallelism, but has low overhead.
-#[deriving(Send,Copy,Clone)]
+#[deriving(Copy,Clone)]
 pub struct SequentialScheduler;
 
 /// Scheduler that spawns a new OS thread for each scheduled function
 ///
 /// Gives maximum parallelism, but has high overhead.
-#[deriving(Send,Copy,Clone)]
+#[deriving(Copy,Clone)]
 pub struct SpawningScheduler;
 
 /// Scheduler that queues all scheduled functions to allow for inspection and later running them in a controlled manner, e.g. in tests
-#[deriving(Send,Clone)]
+#[deriving(Clone)]
 pub struct TestScheduler
 {
     scheduler : Sender<Thunk>,
     scheduled : Arc<Mutex<Receiver<Thunk>>>,
     scheduled_count : Arc<AtomicUint>
 }
+
+impl Send for SequentialScheduler {}
+impl Send for SpawningScheduler {}
+impl Send for TestScheduler {}
 
 impl TestScheduler
 {
