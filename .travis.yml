@@ -2,13 +2,12 @@ language: rust
 
 rust: nightly
 
-env:
-  global:
-    - secure: t/lVWNdPrl854+kNk5rdhUcbc0rzioqh18901ax9QqzN80GUjC/K91BeNJ/PEOIUCREkAhLoB4TNVCBzsz4XMork6fVIuQ/0ZKY+nJc86DTjaOG7CCsP/jd83isEY+/hq3CAkJrWQi0AJsdHri4dPzOgv08gwOyEkItwY5HCwRI=
-    
 script:
   - cargo build -v
   - cargo test -v
-after_script:
-  - cargo doc -v
-  - curl http://www.rust-ci.org/artifacts/put?t=$RUSTCI_TOKEN | sh
+after_success: |
+    cargo doc \
+    && echo '<meta http-equiv=refresh content=0;url=TaskGraph/index.html>' > target/doc/index.html && \
+    sudo pip install ghp-import && \
+    ghp-import -n target/doc && \
+    git push -qf https://${TOKEN}@github.com/${TRAVIS_REPO_SLUG}.git gh-pages
