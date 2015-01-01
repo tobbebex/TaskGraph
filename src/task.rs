@@ -14,7 +14,7 @@ fn run_dependencies(rx: Receiver<Arc<SharedDependency>>)
         let SharedDependency(ref n, ref thunk) = *arc;
         if n.fetch_sub(1, Ordering::SeqCst) == 1
         {
-            thunk.lock().recv().invoke(());
+            thunk.lock().unwrap().recv().invoke(());
         }
     }    
 }
@@ -35,7 +35,7 @@ fn setup_prereqs_ex<F,S>(ready : bool, wait_count : int, prereqs : Vec<&Mutex<Se
         let atom = Arc::new(SharedDependency(AtomicInt::new(wait_count), Mutex::new(rx)));
         for prereq in prereqs.iter()
         {
-            let _ = prereq.lock().send_opt(atom.clone());
+            let _ = prereq.lock().unwrap().send_opt(atom.clone());
         }
     }
 }
@@ -92,7 +92,7 @@ impl<A : Send + Sync> Task<A>
         let f = move |:| { 
             let out = fun();
             {
-                *out_val.write() = Some(out);
+                *out_val.write().unwrap() = Some(out);
             }
             run_dependencies(rx);
         };
@@ -125,13 +125,13 @@ impl<A : Send + Sync> Task<A>
         let in_val = self.value.clone();
         let out_val = value.clone();
         let f = move |:| { 
-            let out = fun(in_val.read().as_ref().unwrap());
+            let out = fun(in_val.read().unwrap().as_ref().unwrap());
             {
-                *out_val.write() = Some(out);
+                *out_val.write().unwrap() = Some(out);
             }
             run_dependencies(rx);
         };
-        let rguard = self.value.read();
+        let rguard = self.value.read().unwrap();
         let mut prereq = Vec::new();
         if rguard.is_none() 
         {
@@ -151,8 +151,8 @@ impl<A : Send + Sync> Task<A>
               S : Scheduler
     {
         let in_val = self.value.clone();
-        let f = move |:| { fun(in_val.read().as_ref().unwrap()) };
-        let rguard = self.value.read();
+        let f = move |:| { fun(in_val.read().unwrap().as_ref().unwrap()) };
+        let rguard = self.value.read().unwrap();
         let mut prereq = Vec::new();
         if rguard.is_none() 
         {
@@ -177,15 +177,15 @@ impl<A : Send + Sync> Task<A>
 	    let b_in_val = other.value.clone();
 	    let out_val = value.clone();
 	    let f = move |:| { 
-	        let out = fun(a_in_val.read().as_ref().unwrap(),b_in_val.read().as_ref().unwrap());
+	        let out = fun(a_in_val.read().unwrap().as_ref().unwrap(),b_in_val.read().unwrap().as_ref().unwrap());
             {
-    	        *out_val.write() = Some(out);
+    	        *out_val.write().unwrap() = Some(out);
             }
 	        run_dependencies(rx);
 	    };
 
-	    let a_rguard = self.value.read();
-	    let b_rguard = other.value.read();
+	    let a_rguard = self.value.read().unwrap();
+	    let b_rguard = other.value.read().unwrap();
 	    let mut prereqs = Vec::with_capacity(2u);
 
 	    if a_rguard.is_none()
@@ -226,7 +226,7 @@ impl<A : Send + Sync> Task<A>
     /// Mostly only useful for testing, or together with waiting for a future returned from `to_future` or `copy_to_future`.
     pub fn is_done(& self) -> bool
     {
-        self.value.read().is_some()
+        self.value.read().unwrap().is_some()
     }
 }
 
@@ -261,15 +261,15 @@ impl<A : Send + Sync> Task<Task<A>>
         let out_val = value.clone();
         let sched_clone = sched.clone();
         let f = move |:| { 
-            in_val.read().as_ref().unwrap().then_forget(&sched_clone, move |a| {
+            in_val.read().unwrap().as_ref().unwrap().then_forget(&sched_clone, move |a| {
                 let out = fun(a);
                 {
-                    *out_val.write() = Some(out);
+                    *out_val.write().unwrap() = Some(out);
                 }
                 run_dependencies(rx);
             });
         };
-        let rguard = self.value.read();
+        let rguard = self.value.read().unwrap();
         let mut prereq = Vec::new();
         if rguard.is_none() 
         {
@@ -314,7 +314,7 @@ pub fn join_all<A:Send+Sync, B:Send+Sync, F, S>(sched : &S, tasks : &[&Task<A>],
     let mut prereqs = Vec::with_capacity(tasks.len());
     for task in tasks.iter()
     {
-        let guard = task.value.read();
+        let guard = task.value.read().unwrap();
         if guard.is_none()
         {
             prereqs.push(&task.deps_after);
@@ -323,10 +323,10 @@ pub fn join_all<A:Send+Sync, B:Send+Sync, F, S>(sched : &S, tasks : &[&Task<A>],
         values.push(task.value.clone());
     }
     let f = move |:| {
-        let val_guards = values.iter().map(|val| val.read()).collect::<Vec<_>>();
+        let val_guards = values.iter().map(|val| val.read().unwrap()).collect::<Vec<_>>();
         let out = fun(val_guards.iter().map(|val| val.as_ref().unwrap()).collect::<Vec<_>>().as_slice());
         {
-            *out_val.write() = Some(out);
+            *out_val.write().unwrap() = Some(out);
         }
         run_dependencies(rx);
     };   
@@ -357,7 +357,7 @@ pub fn join_any<A:Send+Sync, B:Send+Sync, F, S>(sched : &S, tasks : &[&Task<A>],
     let mut ready = false;
     for task in tasks.iter()
     {
-        let guard = task.value.read();
+        let guard = task.value.read().unwrap();
         ready = guard.is_some();
         guards.push(guard);
         values.push(task.value.clone());
@@ -370,12 +370,12 @@ pub fn join_any<A:Send+Sync, B:Send+Sync, F, S>(sched : &S, tasks : &[&Task<A>],
     let f = move |:| {
         for v in values.iter()
         {
-            let guard = v.read();
+            let guard = v.read().unwrap();
             if guard.is_some()
             {
                 let out = fun(guard.as_ref().unwrap());
                 {
-                    *out_val.write() = Some(out);
+                    *out_val.write().unwrap() = Some(out);
                 }
                 run_dependencies(rx);
                 break;
