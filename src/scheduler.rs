@@ -67,7 +67,7 @@ impl TestScheduler
     pub fn run_queued(&self)
     {
         let mut v = Vec::new();
-        while let Ok(t) = self.scheduled.lock().try_recv()
+        while let Ok(t) = self.scheduled.lock().unwrap().try_recv()
         {
             v.push(t);
         }       
