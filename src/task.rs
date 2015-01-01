@@ -1,8 +1,8 @@
 use scheduler::{Scheduler, SequentialScheduler};
-use std::sync::atomic::{AtomicInt, Ordering};
-use std::thunk::Thunk;
-use std::sync::{RWLock,Arc,Mutex,Future};
 use std::comm::{channel, Sender, Receiver};
+use std::sync::atomic::{AtomicInt, Ordering};
+use std::sync::{RWLock,Arc,Mutex,Future};
+use std::thunk::Thunk;
 use std::vec::Vec;
 
 struct SharedDependency(AtomicInt, Mutex<Receiver<Thunk>>);
