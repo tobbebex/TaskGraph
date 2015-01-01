@@ -538,4 +538,191 @@ mod tests {
         assert_eq!(c3.copy_to_future().get(), 1 + 4 + 32);
         assert_eq!(c4.copy_to_future().get(), 1 + 4 + 64);
     }
+
+    #[test]
+    fn join_is_not_scheduled_before_both_parents_are_done() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched2, || {2i} );
+
+        let c = a.join(&sched3, &b, |x,y| { *x + *y });
+
+        sched1.run_queued();
+
+        assert!(a.is_done());
+        assert!(!b.is_done());
+        assert!(!c.is_done());
+
+        assert_eq!(sched3.queued_count(), 0);
+    }
+
+    #[test]
+    fn join_is_scheduled_when_both_parents_are_done() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched2, || {2i} );
+
+        let c = a.join(&sched3, &b, |x,y| { *x + *y });
+
+        sched1.run_queued();
+        sched2.run_queued();
+
+        assert!(a.is_done());
+        assert!(b.is_done());
+        assert!(!c.is_done());
+
+        assert_eq!(sched3.queued_count(), 1);
+    }
+
+    #[test]
+    fn join_returns() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched2, || {2i} );
+
+        let c = a.join(&sched3, &b, |x,y| { *x + *y });
+
+        sched1.run_queued();
+        sched2.run_queued();
+        sched3.run_queued();
+
+        assert!(c.is_done());
+        assert_eq!(c.copy_to_future().get(), 3i);
+    }
+
+    #[test]
+    fn join_all_is_not_scheduled_before_all_parents_are_done() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched1, || {2i} );
+        let c = Task::from_fn(&sched2, || {4i} );
+
+        let d = join_all(&sched3, &[&a,&b,&c], |xs| { *xs[0] + *xs[1] + *xs[2] });
+
+        sched1.run_queued();
+
+        assert!(a.is_done());
+        assert!(b.is_done());
+        assert!(!c.is_done());
+        assert!(!d.is_done());
+
+        assert_eq!(sched3.queued_count(), 0);
+    }
+
+    #[test]
+    fn join_all_is_scheduled_when_all_parents_are_done() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched1, || {2i} );
+        let c = Task::from_fn(&sched2, || {4i} );
+
+        let d = join_all(&sched3, &[&a,&b,&c], |xs| { *xs[0] + *xs[1] + *xs[2] });
+
+        sched1.run_queued();
+        sched2.run_queued();
+
+        assert!(a.is_done());
+        assert!(b.is_done());
+        assert!(c.is_done());
+        assert!(!d.is_done());
+
+        assert_eq!(sched3.queued_count(), 1);
+    }
+
+    #[test]
+    fn join_all_returns() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched1, || {2i} );
+        let c = Task::from_fn(&sched2, || {4i} );
+
+        let d = join_all(&sched3, &[&a,&b,&c], |xs| { *xs[0] + *xs[1] + *xs[2] });
+
+        sched1.run_queued();
+        sched2.run_queued();
+        sched3.run_queued();
+
+        assert!(d.is_done());
+        assert_eq!(d.copy_to_future().get(), 7i);
+    }
+
+    #[test]
+    fn join_any_is_not_scheduled_before_one_parent_is_done() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched1, || {2i} );
+        let c = Task::from_fn(&sched2, || {4i} );
+
+        let d = join_any(&sched3, &[&a,&b,&c], |xs| { *xs + 8i });
+
+        assert!(!a.is_done());
+        assert!(!b.is_done());
+        assert!(!c.is_done());
+        assert!(!d.is_done());
+
+        assert_eq!(sched3.queued_count(), 0);
+    }
+
+    #[test]
+    fn join_any_is_scheduled_when_one_parent_is_done() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched1, || {2i} );
+        let c = Task::from_fn(&sched2, || {4i} );
+
+        let d = join_any(&sched3, &[&a,&b,&c], |xs| { *xs + 8i });
+
+        sched2.run_queued();
+
+        assert!(!a.is_done());
+        assert!(!b.is_done());
+        assert!(c.is_done());
+        assert!(!d.is_done());
+
+        assert_eq!(sched3.queued_count(), 1);
+    }
+
+    #[test]
+    fn join_any_returns() {
+        let sched1 = TestScheduler::new();
+        let sched2 = TestScheduler::new();
+        let sched3 = TestScheduler::new();
+
+        let a = Task::from_fn(&sched1, || {1i} );
+        let b = Task::from_fn(&sched1, || {2i} );
+        let c = Task::from_fn(&sched2, || {4i} );
+
+        let d = join_any(&sched3, &[&a,&b,&c], |xs| { *xs + 8i });
+
+        sched2.run_queued();
+        sched3.run_queued();
+
+        assert!(d.is_done());
+        assert_eq!(d.copy_to_future().get(), 12i);
+    }
 }

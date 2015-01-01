@@ -4,7 +4,7 @@ use std::sync::{Arc,Mutex};
 use std::thread::Thread;
 use std::comm::{channel, Sender, Receiver};
 use std::vec::Vec;
-//use std::sync::TaskPool;
+use std::sync::TaskPool;
 
 /// Trait used for generic scheduling of work
 pub trait Scheduler : Clone + Send
@@ -107,13 +107,12 @@ impl Scheduler for TestScheduler
     }
 }
 
-/*
-// Would have been nice, but unfortunately TaskPool does not implement Clone (but it should...)
-impl Scheduler for TaskPool
+impl Scheduler for Arc<Mutex<TaskPool>>
 {
+    /// Execute `f` on the task pool
     fn schedule<F>(&self, f : F) where F : Send + FnOnce()
     {
-        self.execute(f)
+        self.lock().unwrap().execute(f)
     }
 }
-*/
+
