@@ -139,15 +139,21 @@ There is also a `join_any` that doesnt wait for all the tasks to finish, but run
     let b = task::Task::from_fn(&pool, || { long_running('B', 2); return 7i; } );
     let c = task::Task::from_fn(&pool, || { long_running('C', 1); return -1i; } );
     let d = task::join_any(&pool, &[&a,&b,&c], |&res| {  println!("D got {} first", res); } );
+    a.copy_to_future().get();
+    b.copy_to_future().get();
+    c.copy_to_future().get();
     d.copy_to_future().get();
+    
+Since `join_all` only waits for one of its dependencies, we had to throw in more `copy_to_future`s in order to see all of the task finishing: 
 
-
+    B
     A
     C
     B
     A
-    B
     D got -1 first
+    A
+    A
 
 ---
 
