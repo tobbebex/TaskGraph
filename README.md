@@ -144,7 +144,7 @@ There is also a `join_any` that doesnt wait for all the tasks to finish, but run
     c.copy_to_future().get();
     d.copy_to_future().get();
     
-Since `join_all` only waits for one of its dependencies, we had to throw in more `copy_to_future`s in order to see all of the task finishing: 
+Since `join_any` only waits for one of its dependencies, we had to throw in more `copy_to_future`s in order to see all of the task finishing: 
 
     B
     A
