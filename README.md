@@ -157,7 +157,7 @@ Since `join_any` only waits for one of its dependencies, we had to throw in more
 
 ---
 
-Mix and match thens and joins to create any task graph you like:
+Mix and match thens and joins to create any task graph you like. In this example, we also use the `SequentialScheduler` for short running tasks to minimize overhead:
 
     let a = task::Task::from_fn(&pool, || { long_running('A', 4); return 42i; } );
     let b = task::Task::from_fn(&pool, || { long_running('B', 2); return 7i; } );
