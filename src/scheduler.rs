@@ -1,10 +1,9 @@
 use std::sync::atomic::{AtomicUint, Ordering};
 use std::thunk::Thunk;
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc,Mutex,TaskPool};
 use std::thread::Thread;
-use std::comm::{channel, Sender, Receiver};
+use std::sync::mpsc::{channel, Sender, Receiver};
 use std::vec::Vec;
-use std::sync::TaskPool;
 
 /// Trait used for generic scheduling of work
 pub trait Scheduler : Clone + Send
@@ -18,17 +17,17 @@ pub trait Scheduler : Clone + Send
 /// Scheduler that immediatly runs the function in the same thread 
 ///
 /// Gives no parallelism, but has low overhead.
-#[deriving(Copy,Clone)]
+#[derive(Copy,Clone)]
 pub struct SequentialScheduler;
 
 /// Scheduler that spawns a new OS thread for each scheduled function
 ///
 /// Gives maximum parallelism, but has high overhead.
-#[deriving(Copy,Clone)]
+#[derive(Copy,Clone)]
 pub struct SpawningScheduler;
 
 /// Scheduler that queues all scheduled functions to allow for inspection and later running them in a controlled manner, e.g. in tests
-#[deriving(Clone)]
+#[derive(Clone)]
 pub struct TestScheduler
 {
     scheduler : Sender<Thunk>,
@@ -77,6 +76,17 @@ impl TestScheduler
             t.invoke(());
         }
     }
+
+    /// Run all queued functions, and functions queued by that, recursively
+    ///
+    /// If more functions are scheduled as a result of these functions being run, they will also be run by this.
+    pub fn run_queued_recursive(&self)
+    {
+        while self.queued_count() > 0
+        {
+            self.run_queued()
+        }        
+    }
 }
 
 impl Scheduler for SequentialScheduler
@@ -102,7 +112,7 @@ impl Scheduler for TestScheduler
     /// Queue the function to be run later when `run_queued` is called
     fn schedule<F>(&self, f : F) where F : Send + FnOnce()
     {
-        self.scheduler.send(Thunk::new(f));
+        let _ = self.scheduler.send(Thunk::new(f));
         self.scheduled_count.fetch_add(1u, Ordering::Relaxed);
     }
 }
