@@ -1,7 +1,7 @@
 use scheduler::{Scheduler, SequentialScheduler};
 use std::sync::mpsc::{sync_channel, channel, Sender, Receiver};
 use std::sync::atomic::{AtomicInt, Ordering};
-use std::sync::{Arc,Mutex,Future, MutexGuard};
+use std::sync::{Arc,Mutex,Future};
 use std::thunk::Thunk;
 //use std::vec::Vec;
 
@@ -25,8 +25,9 @@ fn make_shared_dependency<F>(wait_count : int, f: F) -> Arc<SharedDependency>
     Arc::new(SharedDependency(AtomicInt::new(wait_count), Mutex::new(rx)))
 }
 
-fn consume_result<A : Send>(mut value : A, dep_rec : Receiver<Thunk<A,Option<A>>>, mut cell : MutexGuard<Option<A>>)
+fn consume_result<A : Send>(mut value : A, dep_rec : Receiver<Thunk<A,Option<A>>>, mutex : Arc<Mutex<Option<A>>>)
 {
+    let mut guard = mutex.lock().unwrap();
     while let Ok(t) = dep_rec.try_recv()
     {
         if let Some(v) = t.invoke(value)
@@ -38,7 +39,7 @@ fn consume_result<A : Send>(mut value : A, dep_rec : Receiver<Thunk<A,Option<A>>
             return;
         }
     }
-    *cell = Some(value);
+    *guard = Some(value);
 }
 
 
@@ -82,7 +83,7 @@ impl<A : Send> Task<A>
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
-        let f = move |:| { consume_result(fun(), dep_rec, result_clone.lock().unwrap()) };
+        let f = move |:| { consume_result(fun(), dep_rec, result_clone) };
         sched.schedule(f);
         Task { dependencies : dependencies, result : result}
     }
@@ -108,7 +109,7 @@ impl<A : Send> Task<A>
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
-        let f = move |: a| { consume_result(fun(a), dep_rec, result_clone.lock().unwrap()) };
+        let f = move |: a| { consume_result(fun(a), dep_rec, result_clone) };
 
         let mut lock = self.result.lock().unwrap();
         match lock.take()
@@ -148,9 +149,8 @@ impl<A : Send> Task<A>
     /// Create a task that contains the result of this and another task.
     ///
     /// Continuations on this task will run in parallel with other continuations created from clones of these tasks.
-    /// The function `fun` will be scheduled on `sched` as soon as both the current task and the other
-    /// task that the continuation was created from are finished. The function `fun` will retrieve both
-    /// parent tasks output as arguments.
+    /// The returned task will be done as soon as both the current task and the other
+    /// task are finished. 
 	pub fn join<B:Send>(self, other : Task<B>) -> Task<(A,B)>
 	{
         let result = Arc::new(Mutex::new(None));
@@ -166,7 +166,7 @@ impl<A : Send> Task<A>
                 let (tx_a, rx_a) = sync_channel(1);
                 let (tx_b, rx_b) = sync_channel(1);
                 let result_clone = result.clone();
-                let shared_dep = make_shared_dependency(2, move |:| { consume_result((rx_a.recv().unwrap(), rx_b.recv().unwrap()), dep_rec, result_clone.lock().unwrap()); });
+                let shared_dep = make_shared_dependency(2, move |:| { consume_result((rx_a.recv().unwrap(), rx_b.recv().unwrap()), dep_rec, result_clone) });
                 let shared_dep2 = shared_dep.clone();
 
                 let _ = self.dependencies.send(Thunk::with_arg(move |: a| { let _ = tx_a.send(a); run_dependency(shared_dep); None } ));
@@ -176,14 +176,14 @@ impl<A : Send> Task<A>
             {
                 // a not done
                 let result_clone = result.clone();
-                let f = move |:a| { consume_result((a, b), dep_rec, result_clone.lock().unwrap()); None };
+                let f = move |:a| { consume_result((a, b), dep_rec, result_clone); None };
                 let _ = self.dependencies.send(Thunk::with_arg(f));
             }
             (Some(a), None) =>
             {
                 // b not done
                 let result_clone = result.clone();
-                let f = move |:b| { consume_result((a, b), dep_rec, result_clone.lock().unwrap()); None };
+                let f = move |:b| { consume_result((a, b), dep_rec, result_clone); None };
                 let _ = other.dependencies.send(Thunk::with_arg(f));
             }
             (Some(a), Some(b)) =>
@@ -229,7 +229,7 @@ impl<A : Send + Clone> Clone for Task<A>
                 let (dependencies, dep_rec) = channel();
                 let result = Arc::new(Mutex::new(None));
                 let result_clone = result.clone();
-                let f = move |: a : A| { consume_result(a.clone(), dep_rec, result_clone.lock().unwrap()); Some(a) };
+                let f = move |: a : A| { consume_result(a.clone(), dep_rec, result_clone); Some(a) };
                 let _ = self.dependencies.send(Thunk::with_arg(f));
                 Task { dependencies : dependencies, result : result}
             }
@@ -257,7 +257,7 @@ impl<A : Send> Task<Task<A>>
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
         let f = move |: t : Task<A> | { 
-            t.then_forget(&SequentialScheduler, move |: a| { consume_result(a, dep_rec, result_clone.lock().unwrap()) })
+            t.then_forget(&SequentialScheduler, move |: a| { consume_result(a, dep_rec, result_clone) })
         };
 
         self.then_forget(&SequentialScheduler, f);
@@ -266,131 +266,79 @@ impl<A : Send> Task<Task<A>>
     }
 }
 
-/*
-/// Create a task that runs as a continuation of mutliple other tasks
-///
-/// This continuation will run in parallel with other continuations created from these tasks.
-/// The function `fun` will be scheduled on `sched` as soon as all the tasks that the continuation was created from are
-/// finished. The function `fun` will retrieve all the parent tasks output as arguments.
-/// This function works even with an empty slice of input tasks, in which case it is scheduled immediatly (with an empty
-/// slice as input)
-
-trait JoinAll<A : Send>
+/// Trait for joining tasks in `Vec<Task<A>>`
+pub trait Join<A>
 {
-    pub fn join_all(self) -> Task<Vec<A>>;
+    /// Create a task that contains all the results of the input tasks
+    ///
+    /// Continuations on the returned task will run in parallel with other continuations created from these tasks.
+    /// The returned task will be done as soon as all the tasks in the `Vec` are
+    /// finished. The returned task will contain all the input tasks values, but not necessarily in the same order.
+    /// This function works even with an empty `Vec` of input tasks, in which case it is done immediatly (containing an empty
+    /// `Vec`).
+    fn join_all(self) -> Task<Vec<A>>;
+
+    /// Create a task that contains one of the results of the input tasks
+    ///
+    /// Continuations on the returned task will run in parallel with other continuations created from these tasks.
+    /// If at least one of the returned tasks are already done, then the returned task will be done and contain the value
+    /// of that task. Otherwise the returned task will be done as soon as the first input task is done and containe that tasks's value.
+    ///
+    /// Running `join_any` on an empty `Vec`, will result in a task that never finishes (just as `Task::never()`).
+    fn join_any(self) -> Task<A>;
 }
 
-impl<A : Send> JoinAll<A> for Iterator<Task<A>>
+impl<A:Send> Join<A> for Vec<Task<A>>
 {
-    pub fn join_all(self) -> Task<Vec<A>>
-    {
-        panic!("Not impl");
-    }
-}
-*/
-/*
-pub fn join_all<A:Send, F, S>(sched : &S, tasks : &[Task<A>], fun : F) -> Task<B>
-    where F : Send + FnOnce(&[A]) -> B,
-          S : Scheduler
-{
-    let result = Arc::new(Mutex::new(None));
-    let (dependencies, dep_rec) = channel();
-
-    let mut a_lock = self.result.lock().unwrap();
-    let mut b_lock = other.result.lock().unwrap();
-
-    match (a_lock.take(), b_lock.take())
-    {
-        (None,None) =>
+    fn join_all(self) -> Task<Vec<A>>
+    {       
+        let len = self.len();
+        if len == 0
         {
-            // Both not done
-            let (tx_a, rx_a) = sync_channel(1);
-            let (tx_b, rx_b) = sync_channel(1);
-            let result_clone = result.clone();
-            let f = move |:| { consume_result((rx_a.recv(), rx_b.recv()), dep_rec, result_clone.lock().unwrap()) };
-            let shared_dep = make_shared_dependency(2, f);
+            return Task::from_value(Vec::new());
+        }
+        let (tx, rx) = sync_channel(len);
+        let result = Arc::new(Mutex::new(None));
+        let result_clone = result.clone();
+        let (dependencies, dep_rec) = channel();
+
+        let f = move |:| { consume_result(rx.iter().take(len).collect(), dep_rec, result_clone) };
+        let shared_dep =make_shared_dependency(self.len() as int, f);
+
+        for t in self.into_iter()
+        {
             let shared_dep2 = shared_dep.clone();
+            let tx2 = tx.clone();
+            t.then_forget(&SequentialScheduler, move |: a| { let _ =  tx2.send(a); run_dependency(shared_dep2) } );
+        }
 
-            self.dependencies.send(Thunk::with_arg(move |: a| { tx_a.send(a); run_dependency(shared_dep); None } ));
-            other.dependencies.send(Thunk::with_arg(move |: b| { tx_b.send(b); run_dependency(shared_dep2); None } ));
-        }
-        (None, Some(b)) =>
-        {
-            // a not done
-            let result_clone = result.clone();
-            let f = move |:a| { consume_result((a, b), dep_rec, result_clone.lock().unwrap()); None };
-            self.dependencies.send(Thunk::with_arg(f));
-        }
-        (Some(a), None) =>
-        {
-            // b not done
-            let result_clone = result.clone();
-            let f = move |:b| { consume_result((a, b), dep_rec, result_clone.lock().unwrap()); None };
-            other.dependencies.send(Thunk::with_arg(f));
-        }
-        (Some(a), Some(b)) =>
-        {
-            // Both done
-            *result.lock().unwrap() = Some((a, b));
-        }
+        Task { dependencies : dependencies, result : result}    
     }
 
-    Task { dependencies : dependencies, result : result}
-}
-*/
-
-/*
-/// Create a task that runs as a continuation of one of mutliple other tasks
-///
-/// This continuation will run in parallel with other continuations created from these tasks.
-/// The function `fun` will be scheduled on `sched` as soon as at least one the tasks that the continuation was created from are
-/// finished. The function `fun` will retrieve the output from one of the tasks as argument.
-///
-/// Running `join_any` on an empty slice, will result in a task that never runs. 
-pub fn join_any<A:Send, B:Send, F, S>(sched : &S, tasks : &[Task<A>], fun : F) -> Task<B>
-    where F : Send + FnOnce(A) -> B,
-          S : Scheduler
-{
-    let (tx, rx) = sync_channel(1);
-    let result = Arc::new(Mutex::new(None));
-    let result_clone = result.clone();
-    let (dependencies, deps_rec) = channel();
-
-    let mut values = Vec::with_capacity(tasks.len());
-    let mut guards = Vec::with_capacity(tasks.len());
-    let mut prereqs = Vec::with_capacity(tasks.len());
-
-    let mut ready = false;
-    for task in tasks.iter()
+    fn join_any(self) -> Task<A>
     {
-        let guard = task.result.lock().unwrap();
-        ready = *guard;
-        guards.push(guard);
-        values.push(task.value);
-        prereqs.push(&task.dependencies);
-        if ready
+        let (tx, rx) = sync_channel(1);
+        let result : Arc<Mutex<Option<A>>> = Arc::new(Mutex::new(None));
+        let result_clone = result.clone();
+        let (dependencies, dep_rec) = channel();
+        let f = move |:| { consume_result(rx.recv().unwrap(), dep_rec, result_clone) };
+        let shared_dep = make_shared_dependency(1, f);
+        for t in self.into_iter()
         {
-            break;
-        }
-    }   
-    let f = move |:| {
-        for v in values.iter()
-        {           
-            if let Ok(x) = v.try_recv()
+            let shared_dep2 = shared_dep.clone();
+            let tx2 = tx.clone();
+            let done = t.is_done();
+            t.then_forget(&SequentialScheduler, move |: a| { let _ = tx2.try_send(a); run_dependency(shared_dep2) } );
+            if done
             {
-                fun(x);
-                let lock = result_clone.lock().unwrap();
-                *lock = true;
-                run_dependencies(rx);
                 break;
             }
         }
-    };
-    setup_prereqs_ex(ready, 1i, prereqs, sched, f);
 
-    Task { dependencies : dependencies, value : rx, result : result}
+        Task { dependencies : dependencies, result : result}   
+    }
 }
-*/
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,7 +560,7 @@ mod tests {
         assert!(c.is_done());
         assert_eq!(c.into_future().get(), 3i);
     }
-/*
+
     #[test]
     fn join_all_is_not_scheduled_before_all_parents_are_done() {
         let sched1 = TestScheduler::new();
@@ -623,7 +571,7 @@ mod tests {
         let b = Task::from_fn(&sched1, || {2i} );
         let c = Task::from_fn(&sched2, || {4i} );
 
-        let d = join_all(&sched3, &[a.clone(),b.clone(),c.clone()], |xs| { xs[0] + xs[1] + xs[2] });
+        let d = vec![a.clone(),b.clone(),c.clone()].join_all().then(&sched3, |xs| { xs[0] + xs[1] + xs[2] });
 
         sched1.run_queued();
 
@@ -646,7 +594,7 @@ mod tests {
         let b = Task::from_fn(&sched1, || {2i} );
         let c = Task::from_fn(&sched2, || {4i} );
 
-        let d = join_all(&sched3, &[a,b,c], |xs| { xs[0] + xs[1] + xs[2] });
+        let d = vec![a.clone(),b.clone(),c.clone()].join_all().then(&sched3, |xs| { xs[0] + xs[1] + xs[2] });
 
         sched1.run_queued();
         sched2.run_queued();
@@ -669,7 +617,7 @@ mod tests {
         let b = Task::from_fn(&sched1, || {2i} );
         let c = Task::from_fn(&sched2, || {4i} );
 
-        let d = join_all(&sched3, &[a,b,c], |xs| { xs[0] + xs[1] + xs[2] });
+        let d = vec![a,b,c].join_all().then(&sched3, |xs| { xs[0] + xs[1] + xs[2] });
 
         sched1.run_queued();
         sched2.run_queued();
@@ -677,6 +625,13 @@ mod tests {
 
         assert!(d.is_done());
         assert_eq!(d.into_future().get(), 7i);
+    }
+
+    #[test]
+    fn join_all_of_empty_vec_is_done_immediatly() 
+    {
+        let a = Vec::<Task<int>>::new().join_all();
+        assert!(a.is_done());
     }
 
     #[test]
@@ -689,7 +644,7 @@ mod tests {
         let b = Task::from_fn(&sched1, || {2i} );
         let c = Task::from_fn(&sched2, || {4i} );
 
-        let d = join_any(&sched3, &[&a,&b,&c], |xs| { xs + 8i });
+        let d = vec![a.clone(),b.clone(),c.clone()].join_any().then(&sched3, |xs| { xs + 8i });
 
         assert!(!a.is_done());
         assert!(!b.is_done());
@@ -709,7 +664,7 @@ mod tests {
         let b = Task::from_fn(&sched1, || {2i} );
         let c = Task::from_fn(&sched2, || {4i} );
 
-        let d = join_any(&sched3, &[&a,&b,&c], |xs| { *xs + 8i });
+        let d = vec![a.clone(),b.clone(),c.clone()].join_any().then(&sched3, |xs| { xs + 8i });
 
         sched2.run_queued();
 
@@ -731,14 +686,21 @@ mod tests {
         let b = Task::from_fn(&sched1, || {2i} );
         let c = Task::from_fn(&sched2, || {4i} );
 
-        let d = join_any(&sched3, &[&a,&b,&c], |xs| { *xs + 8i });
+        let d = vec![a,b,c].join_any().then(&sched3, |xs| { xs + 8i });
 
         sched2.run_queued();
         sched3.run_queued();
 
         assert!(d.is_done());
         assert_eq!(d.into_future().get(), 12i);
-    }*/
+    }
+
+    #[test]
+    fn join_any_of_empty_vec_is_never_done() 
+    {
+        let a = Vec::<Task<int>>::new().join_any();
+        assert!(!a.is_done());
+    }
 
     fn sort(s : &TestScheduler, mut xs : Vec<int>) -> Task<Vec<int>>
     {
