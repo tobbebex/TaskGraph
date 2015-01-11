@@ -49,12 +49,12 @@ impl TestScheduler
         {
             scheduler : tx,
             scheduled : Arc::new(Mutex::new(rx)),
-            scheduled_count : Arc::new(AtomicUint::new(0u))
+            scheduled_count : Arc::new(AtomicUint::new(0))
         }
     }
 
     /// Current count of functions that has been scheduled since creation or last call to `run_queued`
-    pub fn queued_count(&self) -> uint
+    pub fn queued_count(&self) -> usize
     {
         self.scheduled_count.load(Ordering::Relaxed)
     }
@@ -70,7 +70,7 @@ impl TestScheduler
         {
             v.push(t);
         }       
-        self.scheduled_count.store(0u, Ordering::Relaxed);
+        self.scheduled_count.store(0, Ordering::Relaxed);
         for t in v.into_iter()
         {
             t.invoke(());
@@ -103,7 +103,7 @@ impl Scheduler for SpawningScheduler
     /// Spawn a new (detached) thread that runs `f`
     fn schedule<F>(&self, f : F) where F : Send + FnOnce()
     {
-        Thread::spawn(f).detach()
+        Thread::spawn(f);
     }
 }
 
@@ -113,7 +113,7 @@ impl Scheduler for TestScheduler
     fn schedule<F>(&self, f : F) where F : Send + FnOnce()
     {
         let _ = self.scheduler.send(Thunk::new(f));
-        self.scheduled_count.fetch_add(1u, Ordering::Relaxed);
+        self.scheduled_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 

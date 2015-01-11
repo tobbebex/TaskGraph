@@ -17,10 +17,10 @@ fn run_dependency(arc: Arc<SharedDependency>)
     }
 }
 
-fn make_shared_dependency<F>(wait_count : int, f: F) -> Arc<SharedDependency>
+fn make_shared_dependency<F>(wait_count : isize, f: F) -> Arc<SharedDependency>
     where F : Send + FnOnce()
 {
-    let (tx, rx) = sync_channel(1u);
+    let (tx, rx) = sync_channel(1);
     let _ = tx.send(Thunk::new(f));
     Arc::new(SharedDependency(AtomicInt::new(wait_count), Mutex::new(rx)))
 }
@@ -303,7 +303,7 @@ impl<A:Send> Join<A> for Vec<Task<A>>
         let (dependencies, dep_rec) = channel();
 
         let f = move |:| { consume_result(rx.iter().take(len).collect(), dep_rec, result_clone) };
-        let shared_dep =make_shared_dependency(self.len() as int, f);
+        let shared_dep =make_shared_dependency(self.len() as isize, f);
 
         for t in self.into_iter()
         {
