@@ -1,0 +1,1 @@
+initSidebarItems({"trait":[["Join","Trait for joining tasks in `Vec<Task<A>>`"]],"struct":[["Task","A computation that eventually will produce a value that other tasks can depend on."]]});
