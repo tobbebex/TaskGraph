@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUint, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thunk::Thunk;
 use std::sync::{Arc,Mutex,TaskPool};
 use std::thread::Thread;
@@ -30,9 +30,9 @@ pub struct SpawningScheduler;
 #[derive(Clone)]
 pub struct TestScheduler
 {
-    scheduler : Sender<Thunk>,
-    scheduled : Arc<Mutex<Receiver<Thunk>>>,
-    scheduled_count : Arc<AtomicUint>
+    scheduler : Sender<Thunk<'static>>,
+    scheduled : Arc<Mutex<Receiver<Thunk<'static>>>>,
+    scheduled_count : Arc<AtomicUsize>
 }
 
 unsafe impl Send for SequentialScheduler {}
@@ -49,7 +49,7 @@ impl TestScheduler
         {
             scheduler : tx,
             scheduled : Arc::new(Mutex::new(rx)),
-            scheduled_count : Arc::new(AtomicUint::new(0))
+            scheduled_count : Arc::new(AtomicUsize::new(0))
         }
     }
 
@@ -101,7 +101,7 @@ impl Scheduler for SequentialScheduler
 impl Scheduler for SpawningScheduler
 {
     /// Spawn a new (detached) thread that runs `f`
-    fn schedule<F>(&self, f : F) where F : Send + FnOnce()
+    fn schedule<F>(&self, f : F) where F : Send + FnOnce() + 'static
     {
         Thread::spawn(f);
     }
@@ -110,7 +110,7 @@ impl Scheduler for SpawningScheduler
 impl Scheduler for TestScheduler
 {
     /// Queue the function to be run later when `run_queued` is called
-    fn schedule<F>(&self, f : F) where F : Send + FnOnce()
+    fn schedule<F>(&self, f : F) where F : Send + FnOnce() + 'static
     {
         let _ = self.scheduler.send(Thunk::new(f));
         self.scheduled_count.fetch_add(1, Ordering::Relaxed);
@@ -120,7 +120,7 @@ impl Scheduler for TestScheduler
 impl Scheduler for Arc<Mutex<TaskPool>>
 {
     /// Execute `f` on the task pool
-    fn schedule<F>(&self, f : F) where F : Send + FnOnce()
+    fn schedule<F>(&self, f : F) where F : Send + FnOnce() + 'static
     {
         self.lock().unwrap().execute(f)
     }

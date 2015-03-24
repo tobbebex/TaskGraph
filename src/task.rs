@@ -1,12 +1,12 @@
 use scheduler::{Scheduler, SequentialScheduler};
 use std::sync::mpsc::{sync_channel, channel, Sender, Receiver};
-use std::sync::atomic::{AtomicInt, Ordering};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc,Mutex,Future};
 use std::thunk::Thunk;
 //use std::vec::Vec;
 
 
-struct SharedDependency(AtomicInt, Mutex<Receiver<Thunk>>);
+struct SharedDependency(AtomicIsize, Mutex<Receiver<Thunk<'static>>>);
 
 fn run_dependency(arc: Arc<SharedDependency>)
 {
@@ -18,11 +18,11 @@ fn run_dependency(arc: Arc<SharedDependency>)
 }
 
 fn make_shared_dependency<F>(wait_count : isize, f: F) -> Arc<SharedDependency>
-    where F : Send + FnOnce()
+    where F : Send + FnOnce() + 'static
 {
     let (tx, rx) = sync_channel(1);
     let _ = tx.send(Thunk::new(f));
-    Arc::new(SharedDependency(AtomicInt::new(wait_count), Mutex::new(rx)))
+    Arc::new(SharedDependency(AtomicIsize::new(wait_count), Mutex::new(rx)))
 }
 
 fn consume_result<A : Send>(mut value : A, dep_rec : Receiver<Thunk<A,Option<A>>>, mutex : Arc<Mutex<Option<A>>>)
@@ -58,15 +58,17 @@ fn consume_result<A : Send>(mut value : A, dep_rec : Receiver<Thunk<A,Option<A>>
 ///
 /// The result from the computation will need to be `Send`. `Task` implements `Send` itself and can thus
 /// be used inside and returned from other tasks (effectively forming a monad).
-pub struct Task<A : Send >
+pub struct Task<A : Send + 'static>
 {
-    dependencies : Sender<Thunk<A,Option<A>>>,
+    dependencies : Sender<Thunk<'static,A,Option<A>>>,
     result : Arc<Mutex<Option<A>>>
 }
 
-unsafe impl<A : Send> Send for Task<A> {}
+unsafe impl<A : Send + 'static> Send for Task<A> {}
 
-impl<A : Send> Task<A>
+impl<A> Task<A>
+    where
+        A : Send + 'static
 {
     /// Create a finished task from a value
     pub fn from_value(val : A) -> Task<A>
@@ -77,13 +79,13 @@ impl<A : Send> Task<A>
 
     /// Create a task from a function that will be scheduled to run in `sched`.
     pub fn from_fn<F,S>(sched : &S, fun : F) -> Task<A>
-        where F : Send + FnOnce() -> A,
-              S : Scheduler
+        where F : Send + FnOnce() -> A + 'static,
+              S : Scheduler + 'static
     {
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
-        let f = move |:| { consume_result(fun(), dep_rec, result_clone) };
+        let f = move || { consume_result(fun(), dep_rec, result_clone) };
         sched.schedule(f);
         Task { dependencies : dependencies, result : result}
     }
@@ -102,23 +104,24 @@ impl<A : Send> Task<A>
     /// This continuation will run in parallel with other continuations created from clones of the same task.
     /// The function `fun` will be scheduled on `sched` as soon as the current task that the 
     /// continuation was created from is finished.
-    pub fn then<B : Send,F,S>(self, sched : &S, fun : F) -> Task<B>
-        where F : Send + FnOnce(A) -> B,
-              S : Scheduler
+    pub fn then<B,F,S>(self, sched : &S, fun : F) -> Task<B>
+        where F : Send + FnOnce(A) -> B + 'static,
+              S : Scheduler + 'static,
+              B : Send + 'static
     {
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
-        let f = move |: a| { consume_result(fun(a), dep_rec, result_clone) };
+        let f = move |a| { consume_result(fun(a), dep_rec, result_clone) };
 
         let mut lock = self.result.lock().unwrap();
         match lock.take()
         {
-            Some(a) => sched.schedule(move |:| { f(a) }),
+            Some(a) => sched.schedule(move || { f(a) }),
             None => 
             {
                 let sched_clone = sched.clone();
-                let _ = self.dependencies.send(Thunk::with_arg(move |: a| { sched_clone.schedule(move |:| {f(a)}); None }));
+                let _ = self.dependencies.send(Thunk::with_arg(move |a| { sched_clone.schedule(move || {f(a)}); None }));
             }
         }
 
@@ -131,17 +134,17 @@ impl<A : Send> Task<A>
     /// The function `fun` will be scheduled on `sched` as soon as the current task that the 
     /// continuation was created from is finished.
     pub fn then_forget<F,S>(self, sched : &S, fun : F)
-        where F : Send + FnOnce(A),
-              S : Scheduler
+        where F : Send + FnOnce(A) + 'static,
+              S : Scheduler + 'static
     {
         let mut lock = self.result.lock().unwrap();
         match lock.take()
         {
-            Some(a) => sched.schedule(move |:| { fun(a) }),
+            Some(a) => sched.schedule(move || { fun(a) }),
             None => 
             {
                 let sched_clone = sched.clone();
-                let _ = self.dependencies.send(Thunk::with_arg(move |: a| { sched_clone.schedule(move |:| {fun(a)}); None }));
+                let _ = self.dependencies.send(Thunk::with_arg(move |a| { sched_clone.schedule(move || {fun(a)}); None }));
             }
         }
     }
@@ -151,9 +154,13 @@ impl<A : Send> Task<A>
     /// Continuations on this task will run in parallel with other continuations created from clones of these tasks.
     /// The returned task will be done as soon as both the current task and the other
     /// task are finished. 
-	pub fn join<B:Send>(self, other : Task<B>) -> Task<(A,B)>
+	pub fn join<B>(self, other : Task<B>) -> Task<(A,B)>
+        where
+            A : 'static,
+            B : Send + 'static
 	{
         let result = Arc::new(Mutex::new(None));
+        let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
         let mut a_lock = self.result.lock().unwrap();
         let mut b_lock = other.result.lock().unwrap();
@@ -165,26 +172,21 @@ impl<A : Send> Task<A>
                 // Both not done
                 let (tx_a, rx_a) = sync_channel(1);
                 let (tx_b, rx_b) = sync_channel(1);
-                let result_clone = result.clone();
-                let shared_dep = make_shared_dependency(2, move |:| { consume_result((rx_a.recv().unwrap(), rx_b.recv().unwrap()), dep_rec, result_clone) });
+                let shared_dep = make_shared_dependency(2, move || { consume_result((rx_a.recv().unwrap(), rx_b.recv().unwrap()), dep_rec, result_clone) });
                 let shared_dep2 = shared_dep.clone();
 
-                let _ = self.dependencies.send(Thunk::with_arg(move |: a| { let _ = tx_a.send(a); run_dependency(shared_dep); None } ));
-                let _ = other.dependencies.send(Thunk::with_arg(move |: b| { let _ = tx_b.send(b); run_dependency(shared_dep2); None } ));
+                let _ = self.dependencies.send(Thunk::with_arg(move |a| { let _ = tx_a.send(a); run_dependency(shared_dep); None } ));
+                let _ = other.dependencies.send(Thunk::with_arg(move |b| { let _ = tx_b.send(b); run_dependency(shared_dep2); None } ));
             }
             (None, Some(b)) =>
             {
                 // a not done
-                let result_clone = result.clone();
-                let f = move |:a| { consume_result((a, b), dep_rec, result_clone); None };
-                let _ = self.dependencies.send(Thunk::with_arg(f));
+                let _ = self.dependencies.send(Thunk::with_arg(move |a| { consume_result((a, b), dep_rec, result_clone); None }));
             }
             (Some(a), None) =>
             {
                 // b not done
-                let result_clone = result.clone();
-                let f = move |:b| { consume_result((a, b), dep_rec, result_clone); None };
-                let _ = other.dependencies.send(Thunk::with_arg(f));
+                let _ = other.dependencies.send(Thunk::with_arg(move |b| { consume_result((a, b), dep_rec, result_clone); None }));
             }
             (Some(a), Some(b)) =>
             {
@@ -198,9 +200,10 @@ impl<A : Send> Task<A>
 
     /// Turn this task into a future, from which the result can be retrieved
     pub fn into_future(self) -> Future<A>
+        where A : 'static
     {
         let (tx, rx) = sync_channel(1);
-        self.then_forget(&SequentialScheduler, move |: a| { let _ = tx.send(a); });
+        self.then_forget(&SequentialScheduler, move |a| { let _ = tx.send(a); });
         Future::from_receiver(rx)
     }
 
@@ -213,7 +216,9 @@ impl<A : Send> Task<A>
     }
 }
 
-impl<A : Send + Clone> Clone for Task<A>
+impl<A> Clone for Task<A>
+    where
+        A : Send + Clone + 'static
 {
     /// Clones the task into another task that contains a clone of the original tasks value when the original task completes
     ///
@@ -229,7 +234,7 @@ impl<A : Send + Clone> Clone for Task<A>
                 let (dependencies, dep_rec) = channel();
                 let result = Arc::new(Mutex::new(None));
                 let result_clone = result.clone();
-                let f = move |: a : A| { consume_result(a.clone(), dep_rec, result_clone); Some(a) };
+                let f = move |a : A| { consume_result(a.clone(), dep_rec, result_clone); Some(a) };
                 let _ = self.dependencies.send(Thunk::with_arg(f));
                 Task { dependencies : dependencies, result : result}
             }
@@ -237,15 +242,19 @@ impl<A : Send + Clone> Clone for Task<A>
     }
 }
 
-impl<A : Send + Sync> Task<A>
+impl<A> Task<A>
+    where
+        A : Send + Sync + 'static
 {
     pub fn arc(self) -> Task<Arc<A>>
     {
-        self.then(&SequentialScheduler, |: a| { Arc::new(a) })
+        self.then(&SequentialScheduler, |a| { Arc::new(a) })
     }
 }
 
-impl<A : Send> Task<Task<A>>
+impl<A> Task<Task<A>>
+    where
+        A : Send + 'static
 {
     /// Retrieve the value from the inner task
     ///
@@ -256,13 +265,36 @@ impl<A : Send> Task<Task<A>>
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
-        let f = move |: t : Task<A> | { 
-            t.then_forget(&SequentialScheduler, move |: a| { consume_result(a, dep_rec, result_clone) })
+        let f = move |t : Task<A> | { 
+            t.then_forget(&SequentialScheduler, move |a| { consume_result(a, dep_rec, result_clone) })
         };
 
         self.then_forget(&SequentialScheduler, f);
 
         Task { dependencies : dependencies, result : result}
+    }
+}
+
+impl<A> Task<Vec<A>>
+    where
+        A : Send + 'static
+{
+    pub fn for_each<B : Send,F,S>(self, sched : &S, fun : F) -> Task<Vec<B>>
+        where F : Send + Sync + Fn(A) -> B + 'static,
+              S : Scheduler + 'static
+    {
+        let sched = sched.clone();
+        let f = Arc::new(fun);
+        self.then(&SequentialScheduler, move |v| {
+            let mut tasks = Vec::with_capacity(v.len());
+            for a in v.into_iter()
+            {
+                let sched_c = sched.clone(); 
+                let f2 = f.clone();
+                tasks.push(Task::from_fn(&sched_c, move || { (*f2)(a) }));
+            }
+            tasks.join_all()
+        } ).unwrap()
     }
 }
 
@@ -302,14 +334,14 @@ impl<A:Send> Join<A> for Vec<Task<A>>
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
 
-        let f = move |:| { consume_result(rx.iter().take(len).collect(), dep_rec, result_clone) };
+        let f = move || { consume_result(rx.iter().take(len).collect(), dep_rec, result_clone) };
         let shared_dep =make_shared_dependency(self.len() as isize, f);
 
         for t in self.into_iter()
         {
             let shared_dep2 = shared_dep.clone();
             let tx2 = tx.clone();
-            t.then_forget(&SequentialScheduler, move |: a| { let _ =  tx2.send(a); run_dependency(shared_dep2) } );
+            t.then_forget(&SequentialScheduler, move |a| { let _ =  tx2.send(a); run_dependency(shared_dep2) } );
         }
 
         Task { dependencies : dependencies, result : result}    
@@ -321,14 +353,14 @@ impl<A:Send> Join<A> for Vec<Task<A>>
         let result : Arc<Mutex<Option<A>>> = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
         let (dependencies, dep_rec) = channel();
-        let f = move |:| { consume_result(rx.recv().unwrap(), dep_rec, result_clone) };
+        let f = move || { consume_result(rx.recv().unwrap(), dep_rec, result_clone) };
         let shared_dep = make_shared_dependency(1, f);
         for t in self.into_iter()
         {
             let shared_dep2 = shared_dep.clone();
             let tx2 = tx.clone();
             let done = t.is_done();
-            t.then_forget(&SequentialScheduler, move |: a| { let _ = tx2.try_send(a); run_dependency(shared_dep2) } );
+            t.then_forget(&SequentialScheduler, move |a| { let _ = tx2.try_send(a); run_dependency(shared_dep2) } );
             if done
             {
                 break;
@@ -346,16 +378,16 @@ mod tests {
 
     #[test]
     fn task_from_value_is_done() {
-        let t = Task::from_value(1i);
+        let t = Task::from_value(1i32);
         assert!(t.is_done());
-        assert_eq!(t.into_future().get(), 1i);
+        assert_eq!(t.into_future().get(), 1);
     }
 
     #[test]
     fn task_from_fn_is_scheduled() {
         let sched = TestScheduler::new();
 
-        let t = Task::from_fn(&sched, || { 1i } );
+        let t = Task::from_fn(&sched, || { 1i32 } );
 
         assert!(!t.is_done());
         assert_eq!(sched.queued_count(), 1);
@@ -365,7 +397,7 @@ mod tests {
     fn task_from_fn_returns() {
         let sched = TestScheduler::new();
 
-        let t = Task::from_fn(&sched, || { 1i } );
+        let t = Task::from_fn(&sched, || { 1i32 } );
 
         sched.run_queued();
 
@@ -385,7 +417,7 @@ mod tests {
     fn then_of_done_task_scheduled() {
         let sched = TestScheduler::new();
 
-        let a = Task::from_value(1i);
+        let a = Task::from_value(1i32);
         let b = a.then(&sched, |x| {x + 2} );
 
         assert!(!b.is_done());
@@ -397,7 +429,7 @@ mod tests {
     fn parallel_thens_scheduled_in_parallel() {
         let sched = TestScheduler::new();
 
-        let a = Task::from_value(1i);
+        let a = Task::from_value(1i32);
         let b1 = a.clone().then(&sched, |x| {x + 2} );
         let b2 = a.then(&sched, |x| {x + 4} );
 
@@ -410,7 +442,7 @@ mod tests {
     fn parallel_thens_returns() {
         let sched = TestScheduler::new();
 
-        let a = Task::from_value(1i);
+        let a = Task::from_value(1i32);
         let b1 = a.clone().then(&sched, |x| {x + 2} );
         let b2 = a.then(&sched, |x| {x + 4} );
 
@@ -428,7 +460,7 @@ mod tests {
     fn then_of_then_not_scheduled() {
         let sched = TestScheduler::new();
 
-        let a = Task::from_value(1i);
+        let a = Task::from_value(1i32);
         let b = a.then(&sched, |x| {x + 2} );
         let c = b.then(&sched, |x| {x + 4} );
 
@@ -440,7 +472,7 @@ mod tests {
     fn finished_then_schedules_next_then() {
         let sched = TestScheduler::new();
 
-        let a = Task::from_value(1i);
+        let a = Task::from_value(1i32);
         let b = a.then(&sched, |x| {x + 2} );
         let c = b.clone().then(&sched, |x| {x + 4} );
 
@@ -455,7 +487,7 @@ mod tests {
     fn parallel_thens_of_parallel_thens_scheduled_in_parallel() {
         let sched = TestScheduler::new();
 
-        let a = Task::from_value(1i);
+        let a = Task::from_value(1i32);
         let b1 = a.clone().then(&sched, |x| {x + 2} );
         let b2 = a.then(&sched, |x| {x + 4} );
 
@@ -477,7 +509,7 @@ mod tests {
     fn parallel_thens_of_parallel_thens_returns() {
         let sched = TestScheduler::new();
 
-        let a = Task::from_value(1i);
+        let a = Task::from_value(1i32);
         let b1 = a.clone().then(&sched, |x| {x + 2} );
         let b2 = a.then(&sched, |x| {x + 4} );
 
@@ -507,8 +539,8 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched2, || {2i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched2, || {2i32} );
 
         let c = a.clone().join(b.clone()).then(&sched3, |(x,y)| { x + y });
 
@@ -527,8 +559,8 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched2, || {2i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched2, || {2i32} );
 
         let c = a.clone().join(b.clone()).then(&sched3, |(x,y)| { x + y });
 
@@ -548,8 +580,8 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched2, || {2i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched2, || {2i32} );
 
         let c = a.join(b).then(&sched3, |(x,y)| { x + y });
 
@@ -558,7 +590,7 @@ mod tests {
         sched3.run_queued();
 
         assert!(c.is_done());
-        assert_eq!(c.into_future().get(), 3i);
+        assert_eq!(c.into_future().get(), 3);
     }
 
     #[test]
@@ -567,9 +599,9 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched1, || {2i} );
-        let c = Task::from_fn(&sched2, || {4i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched1, || {2i32} );
+        let c = Task::from_fn(&sched2, || {4i32} );
 
         let d = vec![a.clone(),b.clone(),c.clone()].join_all().then(&sched3, |xs| { xs[0] + xs[1] + xs[2] });
 
@@ -590,9 +622,9 @@ mod tests {
         let sched3 = TestScheduler::new();
 
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched1, || {2i} );
-        let c = Task::from_fn(&sched2, || {4i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched1, || {2i32} );
+        let c = Task::from_fn(&sched2, || {4i32} );
 
         let d = vec![a.clone(),b.clone(),c.clone()].join_all().then(&sched3, |xs| { xs[0] + xs[1] + xs[2] });
 
@@ -613,9 +645,9 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched1, || {2i} );
-        let c = Task::from_fn(&sched2, || {4i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched1, || {2i32} );
+        let c = Task::from_fn(&sched2, || {4i32} );
 
         let d = vec![a,b,c].join_all().then(&sched3, |xs| { xs[0] + xs[1] + xs[2] });
 
@@ -624,7 +656,7 @@ mod tests {
         sched3.run_queued();
 
         assert!(d.is_done());
-        assert_eq!(d.into_future().get(), 7i);
+        assert_eq!(d.into_future().get(), 7);
     }
 
     #[test]
@@ -640,11 +672,11 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched1, || {2i} );
-        let c = Task::from_fn(&sched2, || {4i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched1, || {2i32} );
+        let c = Task::from_fn(&sched2, || {4i32} );
 
-        let d = vec![a.clone(),b.clone(),c.clone()].join_any().then(&sched3, |xs| { xs + 8i });
+        let d = vec![a.clone(),b.clone(),c.clone()].join_any().then(&sched3, |xs| { xs + 8 });
 
         assert!(!a.is_done());
         assert!(!b.is_done());
@@ -660,11 +692,11 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched1, || {2i} );
-        let c = Task::from_fn(&sched2, || {4i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched1, || {2i32} );
+        let c = Task::from_fn(&sched2, || {4i32} );
 
-        let d = vec![a.clone(),b.clone(),c.clone()].join_any().then(&sched3, |xs| { xs + 8i });
+        let d = vec![a.clone(),b.clone(),c.clone()].join_any().then(&sched3, |xs| { xs + 8 });
 
         sched2.run_queued();
 
@@ -682,17 +714,17 @@ mod tests {
         let sched2 = TestScheduler::new();
         let sched3 = TestScheduler::new();
 
-        let a = Task::from_fn(&sched1, || {1i} );
-        let b = Task::from_fn(&sched1, || {2i} );
-        let c = Task::from_fn(&sched2, || {4i} );
+        let a = Task::from_fn(&sched1, || {1i32} );
+        let b = Task::from_fn(&sched1, || {2i32} );
+        let c = Task::from_fn(&sched2, || {4i32} );
 
-        let d = vec![a,b,c].join_any().then(&sched3, |xs| { xs + 8i });
+        let d = vec![a,b,c].join_any().then(&sched3, |xs| { xs + 8 });
 
         sched2.run_queued();
         sched3.run_queued();
 
         assert!(d.is_done());
-        assert_eq!(d.into_future().get(), 12i);
+        assert_eq!(d.into_future().get(), 12);
     }
 
     #[test]
@@ -702,7 +734,7 @@ mod tests {
         assert!(!a.is_done());
     }
 
-    fn sort(s : &TestScheduler, mut xs : Vec<int>) -> Task<Vec<int>>
+    fn sort(s : &TestScheduler, mut xs : Vec<i32>) -> Task<Vec<i32>>
     {
         if xs.len() <= 1
         {
@@ -722,9 +754,33 @@ mod tests {
     #[test]
     fn can_loop() {
         let sched = TestScheduler::new();
-        let unsorted = vec![6,2,3,1,6,3,4];
+        let unsorted = vec![6i32,2,3,1,6,3,4];
         let mut sorted = sort(&sched, unsorted).into_future();
         sched.run_queued_recursive();
         assert_eq!(vec![1, 2, 3, 3, 4, 6, 6], sorted.get());
+    }
+
+    #[test]
+    fn for_each_scheduled_in_parallel()
+    {
+        let sched = TestScheduler::new();
+
+        let a = Task::from_value(vec![6i32,2,3,1,6,3,4]);
+        let b = a.for_each(&sched, |a| { a + 1});
+
+        assert_eq!(sched.queued_count(), 7);
+    }
+
+    #[test]
+    fn for_each_returns()
+    {
+        let sched = TestScheduler::new();
+
+        let a = Task::from_value(vec![6i32,2,3,1,6,3,4]);
+        let b = a.for_each(&sched, |a| { a + 1});
+
+        sched.run_queued();
+
+        assert_eq!(vec![7i32,3,4,2,7,4,5], b.into_future().get());
     }
 }
